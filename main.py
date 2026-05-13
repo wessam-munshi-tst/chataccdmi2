@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import time
 import uuid
 import logging
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, AsyncGenerator
 
 import pandas as pd
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google import genai
@@ -446,27 +447,25 @@ connection_manager = ConnectionManager()
 # GEMINI AUDIO SESSION
 # =============================================================================
 
+# Module-level dict to pass video trigger matches from session → polling endpoint
+_pending_video_trigger: dict = {}
+
+
 def _check_video_triggers(text: str) -> None:
     """Check if text matches any video trigger keyword and fire the video command."""
     try:
-        triggers_file = Path("video_triggers.json")
-        if not triggers_file.exists():
+        if not VIDEO_TRIGGERS_FILE.exists():
             return
-        triggers = json.loads(triggers_file.read_text(encoding="utf-8"))
+        triggers = json.loads(VIDEO_TRIGGERS_FILE.read_text(encoding="utf-8"))
         text_lower = text.strip().lower()
         for trigger in triggers:
             for keyword in trigger.get("keywords", []):
                 if keyword.strip().lower() in text_lower:
-                    # video_command_state is defined later — use a deferred import pattern
-                    # We store a pending trigger in a module-level variable checked on startup
                     _pending_video_trigger["trigger"] = trigger
-                    logger.info(f"Video trigger matched via transcript: {trigger.get('trigger_id')} (keyword: {keyword})")
+                    logger.info(f"Video trigger matched: {trigger.get('trigger_id')} (keyword: {keyword})")
                     return
     except Exception:
         pass
-
-
-_pending_video_trigger: dict = {}
 
 
 class GeminiAudioSession:
@@ -616,9 +615,6 @@ class GeminiAudioSession:
                 except Exception:
                     self._client_disconnected = True
                     return
-            # Check text parts for video trigger keywords
-            if part.text:
-                _check_video_triggers(part.text)
     
     async def _send_audio(self, session) -> None:
         """Forward audio from the client to Gemini."""
@@ -987,7 +983,6 @@ async def admin_set_instructions(request: InstructionsRequest) -> AdminResponse:
 
 def _get_tenant_or_404(tenant_id: str) -> TenantState:
     """Get tenant or raise 404."""
-    from fastapi import HTTPException
     if not tenant_manager.is_valid_tenant(tenant_id):
         raise HTTPException(status_code=404, detail=f"Tenant not found: {tenant_id}")
     return tenant_manager.get_tenant(tenant_id)
@@ -1147,10 +1142,6 @@ async def admin_upload_excel(file: UploadFile = File(...)) -> AdminResponse:
 # =============================================================================
 # VIDEO TRIGGER SYSTEM
 # =============================================================================
-
-import re
-import shutil
-from fastapi import HTTPException
 
 VIDEOS_DIR = Path("static/videos")
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1351,7 +1342,6 @@ from fastapi.responses import HTMLResponse
 @app.get("/{tenant_id}/admin")
 async def serve_tenant_admin(tenant_id: str) -> HTMLResponse:
     """Serve the admin control panel for a specific tenant."""
-    from fastapi import HTTPException
     
     # Validate tenant
     if not tenant_manager.is_valid_tenant(tenant_id):
@@ -1396,7 +1386,6 @@ async def serve_dynamic_file(file_path: str):
     3. NO serving files from system directories (e.g. venv/, __pycache__/).
     4. ONLY serve files if they are inside a valid subdirectory (e.g. ksu/index.html).
     """
-    from fastapi import HTTPException
     
     # Resolve the path relative to the project root
     project_root = Path(".").resolve()
